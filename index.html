@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<title>Face Sign In - 增强版</title>
+<script defer src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<style>
+body { font-family: Arial; text-align:center; margin-top:20px; }
+#video { width: 640px; height: 480px; border-radius:10px; }
+#status { margin: 10px 0; font-weight: bold; font-size: 18px; }
+.loading { color: blue; }
+.success { color: green; }
+.error { color: red; }
+canvas { position: absolute; top: 0; left: 0; z-index: 10; }
+.video-container { 
+    position: relative; 
+    display: inline-block; 
+    margin-bottom: 20px;
+}
+#recognitionInfo {
+    margin: 20px auto;
+    padding: 15px;
+    background-color: #f5f5f5;
+    border-radius: 8px;
+    max-width: 600px;
+    text-align: left;
+}
+.signin-success {
+    background-color: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+    padding: 15px;
+    margin: 20px auto;
+    border-radius: 8px;
+    max-width: 600px;
+}
+#resultIframe {
+    display: none;
+    width: 0;
+    height: 0;
+    border: 0;
+}
+.security-indicator {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-right: 5px;
+}
+.security-high { background-color: #4CAF50; }
+.security-medium { background-color: #FFC107; }
+.security-low { background-color: #F44336; }
+.stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 10px;
+}
+.stat-item {
+    background: white;
+    padding: 8px;
+    border-radius: 5px;
+    font-size: 14px;
+}
+</style>
+</head>
+<body>
+
+<h2>会议签到 - 增强版人脸识别</h2>
+
+<div class="video-container">
+    <video id="video" width="640" height="480" autoplay muted></video>
+</div>
+
+<div id="status" class="loading">正在初始化增强版识别系统...</div>
+
+<div id="recognitionInfo" style="display: none;">
+    <h3>识别结果</h3>
+    <p>姓名: <span id="recognizedName">-</span></p>
+    <div class="stats-grid">
+        <div class="stat-item">置信度: <span id="recognitionConfidence">-</span></div>
+        <div class="stat-item">相似度: <span id="recognitionSimilarity">-</span></div>
+        <div class="stat-item">连续匹配: <span id="consecutiveMatches">0/3</span></div>
+        <div class="stat-item">Z-score: <span id="zScore">-</span></div>
+    </div>
+    <p>状态: <span id="recognitionStatus">正在初始化...</span></p>
+</div>
+
+<!-- 签到成功提示区域 -->
+<div id="signinSuccess" class="signin-success" style="display: none;">
+    <h3>✓ 签到成功！</h3>
+    <p>姓名: <span id="successName">-</span></p>
+    <p>时间: <span id="successTime">-</span></p>
+    <p>安全等级: <span id="securityLevel">高</span> <span class="security-indicator security-high"></span></p>
+    <p>数据已成功提交到Google表格</p>
+</div>
+
+<!-- 隐藏的表单和iframe -->
+<iframe id="resultIframe" name="resultIframe"></iframe>
+<form id="sendForm" method="post" target="resultIframe" 
+      action="https://script.google.com/macros/s/AKfycbwredN437XGaJCdq8qH9dQPM2CkXNNIkPLFfvB8BMxqAvSv7Dd4WnlhIn5wXKY5nsZs/exec" 
+      style="display: none;">
+    <input type="hidden" name="name" id="nameField">
+    <input type="hidden" name="timestamp" id="timeField">
+</form>
+
+<script>
+// ===============================
+// 增强版人脸验证器
+// ===============================
+class EnhancedFaceVerifier {
+  constructor() {
+    this.knownFaces = new Map();
+    this.consecutiveMatches = new Map();
+    this.REQUIRED_CONSECUTIVE = 3; // 需要连续3帧匹配
+    this.lastVerificationTime = 0;
+    this.verificationDelay = 300; // 毫秒
+  }
+  
+  // 添加已知人脸（支持多样本）
+  addKnownFace(name, embeddings) {
+    if (!Array.isArray(embeddings[0])) {
+      embeddings = [embeddings]; // 单样本转为数组
+    }
+    
+    // 计算统计特征
+    const mean = this.calculateMean(embeddings);
+    const std = this.calculateStd(embeddings, mean);
+    const minSimilarity = this.calculateMinSimilarity(embeddings);
+    
+    this.knownFaces.set(name, {
+      name: name,
+      embeddings: embeddings,
+      mean: mean,
+      std: std,
+      minSimilarity: minSimilarity
+    });
+    
+    this.consecutiveMatches.set(name, 0);
+    console.log(`已加载用户: ${name}, 样本数: ${embeddings.length}, 内部相似度: ${minSimilarity.toFixed(4)}`);
+  }
+  
+  // 计算均值向量
+  calculateMean(embeddings) {
+    const dimensions = embeddings[0].length;
+    const mean = new Array(dimensions).fill(0);
+    
+    for (const emb of embeddings) {
+      for (let i = 0; i < dimensions; i++) {
+        mean[i] += emb[i];
+      }
+    }
+    
+    return mean.map(val => val / embeddings.length);
+  }
+  
+  // 计算标准差向量
+  calculateStd(embeddings, mean) {
+    const dimensions = embeddings[0].length;
+    const variance = new Array(dimensions).fill(0);
+    
+    for (const emb of embeddings) {
+      for (let i = 0; i < dimensions; i++) {
+        variance[i] += Math.pow(emb[i] - mean[i], 2);
+      }
+    }
+    
+    // 加一个小值防止除零
+    return variance.map(val => Math.sqrt(val / embeddings.length) + 1e-8);
+  }
+  
+  // 计算内部最小相似度
+  calculateMinSimilarity(embeddings) {
+    if (embeddings.length <= 1) return 0.9; // 单样本默认
+    
+    let minSim = 1;
+    for (let i = 0; i < embeddings.length; i++) {
+      for (let j = i + 1; j < embeddings.length; j++) {
+        const sim = this.cosineSimilarity(embeddings[i], embeddings[j]);
+        if (sim < minSim) minSim = sim;
+      }
+    }
+    return minSim;
+  }
+  
+  // 余弦相似度（更准确）
+  cosineSimilarity(a, b) {
+    let dot = 0, normA = 0, normB = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
+    }
+    return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+  }
+  
+  // Z-score标准化距离
+  zScoreDistance(liveEmbedding, knownFace) {
+    let totalZ = 0;
+    const dimensions = liveEmbedding.length;
+    
+    for (let i = 0; i < dimensions; i++) {
+      const z = Math.abs((liveEmbedding[i] - knownFace.mean[i]) / knownFace.std[i]);
+      totalZ += z;
+    }
+    
+    return totalZ / dimensions; // 平均Z-score
+  }
+  
+  // 综合验证人脸
+  verifyFace(liveEmbedding) {
+    const now = Date.now();
+    if (now - this.lastVerificationTime < this.verificationDelay) {
+      return null; // 防止过于频繁验证
+    }
+    this.lastVerificationTime = now;
+    
+    let bestMatch = null;
+    let bestScore = Infinity;
+    let bestSimilarity = -1;
+    let bestZScore = Infinity;
+    
+    // 遍历所有已知人脸
+    for (const [name, faceData] of this.knownFaces) {
+      // 计算Z-score距离
+      const zScore = this.zScoreDistance(liveEmbedding, faceData);
+      
+      // 计算余弦相似度
+      const similarity = this.cosineSimilarity(liveEmbedding, faceData.mean);
+      
+      // 综合得分（Z-score权重70%，相似度30%）
+      const combinedScore = zScore * 0.7 + (1 - similarity) * 0.3;
+      
+      if (combinedScore < bestScore) {
+        bestScore = combinedScore;
+        bestSimilarity = similarity;
+        bestZScore = zScore;
+        bestMatch = name;
+      }
+    }
+    
+    if (!bestMatch) return null;
+    
+    const faceData = this.knownFaces.get(bestMatch);
+    
+    // 三重阈值验证
+    const isZScoreValid = bestZScore < 0.85;                    // Z-score阈值
+    const isSimilarityValid = bestSimilarity > 0.75;           // 相似度阈值
+    const isInternalValid = bestSimilarity > (faceData.minSimilarity * 0.85); // 内部一致性
+    
+    if (isZScoreValid && isSimilarityValid && isInternalValid) {
+      // 更新连续匹配计数
+      const currentCount = this.consecutiveMatches.get(bestMatch) + 1;
+      this.consecutiveMatches.set(bestMatch, currentCount);
+      
+      // 重置其他用户的计数
+      for (const [name] of this.consecutiveMatches) {
+        if (name !== bestMatch) {
+          this.consecutiveMatches.set(name, 0);
+        }
+      }
+      
+      // 计算综合置信度
+      const confidence = Math.min(0.99, 0.7 * (1 - bestZScore) + 0.3 * bestSimilarity);
+      
+      return {
+        name: bestMatch,
+        zScore: bestZScore,
+        similarity: bestSimilarity,
+        confidence: confidence,
+        consecutiveMatches: currentCount,
+        isConfirmed: currentCount >= this.REQUIRED_CONSECUTIVE,
+        securityLevel: this.getSecurityLevel(confidence, bestZScore, bestSimilarity)
+      };
+    } else {
+      // 验证失败，重置该用户的计数
+      this.consecutiveMatches.set(bestMatch, 0);
+      return {
+        name: bestMatch,
+        zScore: bestZScore,
+        similarity: bestSimilarity,
+        confidence: 0,
+        consecutiveMatches: 0,
+        isConfirmed: false,
+        securityLevel: 'low',
+        reason: !isZScoreValid ? 'Z-score过高' : !isSimilarityValid ? '相似度不足' : '内部不一致'
+      };
+    }
+  }
+  
+  // 获取安全等级
+  getSecurityLevel(confidence, zScore, similarity) {
+    if (confidence > 0.85 && zScore < 0.7 && similarity > 0.8) return 'high';
+    if (confidence > 0.75 && zScore < 0.8 && similarity > 0.75) return 'medium';
+    return 'low';
+  }
+  
+  // 获取状态
+  getStatus() {
+    const status = {};
+    for (const [name, count] of this.consecutiveMatches) {
+      status[name] = { consecutiveMatches: count };
+    }
+    return status;
+  }
+}
+
+// ===============================
+// 已知用户数据（需要从collector复制过来）
+// ===============================
+const KNOWN_DATA = [
+  // 这里粘贴从face-collector生成的JSON数据
+  // 格式可以是单样本或多样本
+];
+
+// ===============================
+// 主程序
+// ===============================
+let faceVerifier = null;
+let isRecognizing = false;
+let modelsLoaded = false;
+let hasSignedIn = false;
+let isSubmitting = false;
+
+// DOM 元素引用
+const videoElement = document.getElementById('video');
+const statusEl = document.getElementById('status');
+const recognitionInfoEl = document.getElementById('recognitionInfo');
+const recognizedNameEl = document.getElementById('recognizedName');
+const recognitionConfidenceEl = document.getElementById('recognitionConfidence');
+const recognitionSimilarityEl = document.getElementById('recognitionSimilarity');
+const consecutiveMatchesEl = document.getElementById('consecutiveMatches');
+const zScoreEl = document.getElementById('zScore');
+const recognitionStatusEl = document.getElementById('recognitionStatus');
+const signinSuccessEl = document.getElementById('signinSuccess');
+const successNameEl = document.getElementById('successName');
+const successTimeEl = document.getElementById('successTime');
+const securityLevelEl = document.getElementById('securityLevel');
+
+// 页面加载后执行
+window.addEventListener('load', async () => {
+  try {
+    statusEl.textContent = '正在初始化增强版人脸识别系统...';
+    statusEl.className = 'loading';
+    
+    // 1. 检查face-api.js
+    await checkFaceAPI();
+    
+    // 2. 启动摄像头
+    await startCamera();
+    
+    // 3. 加载模型
+    await loadModels();
+    
+    // 4. 初始化增强验证器
+    faceVerifier = new EnhancedFaceVerifier();
+    
+    // 5. 加载已知人脸数据
+    await loadKnownFaces();
+    
+    modelsLoaded = true;
+    statusEl.textContent = '✓ 增强版系统已就绪！开始识别...';
+    statusEl.className = 'success';
+    
+    // 显示识别信息区域
+    recognitionInfoEl.style.display = 'block';
+    
+    // 开始识别循环
+    recognizeLoop();
+    
+  } catch (error) {
+    console.error('初始化失败:', error);
+    statusEl.textContent = '初始化失败: ' + error.message;
+    statusEl.className = 'error';
+  }
+});
+
+// 检查 faceapi 是否加载
+function checkFaceAPI() {
+  return new Promise((resolve, reject) => {
+    if (window.faceapi) {
+      console.log('faceapi 已加载');
+      resolve();
+      return;
+    }
+    
+    let attempts = 0;
+    const maxAttempts = 30;
+    const interval = setInterval(() => {
+      attempts++;
+      if (window.faceapi) {
+        clearInterval(interval);
+        console.log('faceapi 加载成功');
+        resolve();
+      } else if (attempts >= maxAttempts) {
+        clearInterval(interval);
+        reject(new Error('face-api.js 加载超时'));
+      }
+    }, 100);
+  });
+}
+
+// 启动摄像头
+async function startCamera() {
+  try {
+    statusEl.textContent = '正在请求摄像头权限...';
+    statusEl.className = 'loading';
+    
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+      video: { 
+        width: 640, 
+        height: 480,
+        facingMode: "user" 
+      } 
+    });
+    
+    videoElement.srcObject = stream;
+    
+    return new Promise((resolve) => {
+      videoElement.onloadedmetadata = () => {
+        videoElement.play();
+        console.log('摄像头启动完成');
+        resolve();
+      };
+    });
+  } catch (error) {
+    console.error('摄像头错误:', error);
+    throw new Error('无法访问摄像头: ' + error.message);
+  }
+}
+
+// 加载模型
+async function loadModels() {
+  try {
+    statusEl.textContent = '正在加载人脸识别模型...';
+    statusEl.className = 'loading';
+    
+    const MODEL_URL = "https://justadudewhohacks.github.io/face-api.js/models";
+    
+    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+    await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+    await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+    
+    console.log('所有模型加载成功');
+    
+  } catch (error) {
+    console.error('模型加载失败:', error);
+    throw new Error('模型加载失败: ' + error.message);
+  }
+}
+
+// 加载已知人脸数据
+async function loadKnownFaces() {
+  try {
+    statusEl.textContent = '正在加载已知人脸数据...';
+    
+    // 支持两种格式：旧格式（单样本）和新格式（多样本）
+    KNOWN_DATA.forEach(person => {
+      if (person.embeddings && Array.isArray(person.embeddings[0])) {
+        // 新格式：多样本
+        faceVerifier.addKnownFace(person.name, person.embeddings);
+      } else if (person.embedding) {
+        // 旧格式：单样本
+        faceVerifier.addKnownFace(person.name, person.embedding);
+      } else {
+        console.warn('未知的数据格式:', person);
+      }
+    });
+    
+    const userCount = faceVerifier.knownFaces.size;
+    console.log(`已加载 ${userCount} 个用户数据`);
+    statusEl.textContent = `✓ 已加载 ${userCount} 个用户数据`;
+    
+  } catch (error) {
+    console.error('加载人脸数据失败:', error);
+    throw new Error('人脸数据加载失败: ' + error.message);
+  }
+}
+
+// 增强版识别循环
+async function recognizeLoop() {
+  if (!modelsLoaded || isRecognizing || hasSignedIn) return;
+  
+  try {
+    isRecognizing = true;
+    
+    // 检测人脸（提高检测阈值）
+    const detection = await faceapi
+      .detectSingleFace(videoElement, new faceapi.TinyFaceDetectorOptions({
+        inputSize: 320,
+        scoreThreshold: 0.6
+      }))
+      .withFaceLandmarks()
+      .withFaceDescriptor();
+    
+    if (detection && detection.detection.score > 0.7) {
+      // 使用增强验证器
+      const result = faceVerifier.verifyFace(detection.descriptor);
+      
+      if (result && result.confidence > 0) {
+        // 更新UI显示
+        updateRecognitionUI(result);
+        
+        // 检查是否确认
+        if (result.isConfirmed && result.confidence > 0.85 && !hasSignedIn) {
+          hasSignedIn = true;
+          showSignInSuccess(result.name, result);
+          sendSignIn(result.name, result.confidence);
+        }
+        
+        // 绘制检测框
+        drawDetection(detection, result);
+        
+      } else {
+        // 验证失败
+        resetRecognitionUI();
+        if (result && result.reason) {
+          recognitionStatusEl.textContent = `验证失败: ${result.reason}`;
+        } else {
+          recognitionStatusEl.textContent = '验证失败';
+        }
+        recognitionStatusEl.style.color = 'red';
+      }
+      
+    } else {
+      // 未检测到人脸或质量太低
+      resetRecognitionUI();
+      if (detection) {
+        recognitionStatusEl.textContent = `检测质量低: ${detection.detection.score.toFixed(3)}`;
+      } else {
+        recognitionStatusEl.textContent = '未检测到人脸';
+      }
+      recognitionStatusEl.style.color = 'orange';
+    }
+    
+  } catch (error) {
+    console.error('识别错误:', error);
+    recognitionStatusEl.textContent = '识别错误: ' + error.message;
+    recognitionStatusEl.style.color = 'red';
+  } finally {
+    isRecognizing = false;
+    
+    // 继续识别循环（如果未签到）
+    if (!hasSignedIn) {
+      setTimeout(recognizeLoop, 300);
+    }
+  }
+}
+
+// 更新识别UI
+function updateRecognitionUI(result) {
+  recognizedNameEl.textContent = result.name;
+  recognitionConfidenceEl.textContent = result.confidence.toFixed(4);
+  recognitionSimilarityEl.textContent = result.similarity.toFixed(4);
+  consecutiveMatchesEl.textContent = `${result.consecutiveMatches}/${faceVerifier.REQUIRED_CONSECUTIVE}`;
+  zScoreEl.textContent = result.zScore.toFixed(4);
+  
+  // 设置状态颜色
+  if (result.isConfirmed) {
+    recognitionStatusEl.textContent = '✓ 高置信度确认！';
+    recognitionStatusEl.style.color = 'green';
+  } else if (result.confidence > 0.8) {
+    recognitionStatusEl.textContent = `✓ 匹配中... (${result.consecutiveMatches}/${faceVerifier.REQUIRED_CONSECUTIVE})`;
+    recognitionStatusEl.style.color = 'orange';
+  } else if (result.confidence > 0.7) {
+    recognitionStatusEl.textContent = `低置信度，请保持姿势`;
+    recognitionStatusEl.style.color = '#FF9800';
+  } else {
+    recognitionStatusEl.textContent = '置信度不足';
+    recognitionStatusEl.style.color = 'red';
+  }
+}
+
+// 重置识别UI
+function resetRecognitionUI() {
+  recognizedNameEl.textContent = '-';
+  recognitionConfidenceEl.textContent = '-';
+  recognitionSimilarityEl.textContent = '-';
+  consecutiveMatchesEl.textContent = '0/3';
+  zScoreEl.textContent = '-';
+}
+
+// 绘制检测框
+function drawDetection(detection, result) {
+  const oldCanvas = document.querySelector('canvas');
+  if (oldCanvas) oldCanvas.remove();
+  
+  const canvas = faceapi.createCanvasFromMedia(videoElement);
+  const container = document.querySelector('.video-container');
+  container.appendChild(canvas);
+  
+  const displaySize = { width: videoElement.width, height: videoElement.height };
+  faceapi.matchDimensions(canvas, displaySize);
+  
+  const resizedDetection = faceapi.resizeResults(detection, displaySize);
+  
+  // 设置边框颜色
+  const borderColor = result.confidence > 0.85 ? '#00ff00' : 
+                     result.confance > 0.75 ? '#ff9900' : '#ff0000';
+  
+  const ctx = canvas.getContext('2d');
+  
+  // 绘制检测框
+  faceapi.draw.drawDetections(canvas, [resizedDetection]);
+  faceapi.draw.drawFaceLandmarks(canvas, [resizedDetection]);
+  
+  // 添加文字标签
+  ctx.font = '16px Arial';
+  ctx.fillStyle = borderColor;
+  ctx.fillText(`${result.name} (${(result.confidence*100).toFixed(1)}%)`, 
+               resizedDetection.detection.box.x, 
+               resizedDetection.detection.box.y - 10);
+}
+
+// 显示签到成功信息
+function showSignInSuccess(name, result) {
+  const now = new Date();
+  successNameEl.textContent = name;
+  successTimeEl.textContent = now.toLocaleString();
+  
+  // 设置安全等级显示
+  const securityLevels = {
+    high: { text: '高', class: 'security-high', color: '#4CAF50' },
+    medium: { text: '中', class: 'security-medium', color: '#FFC107' },
+    low: { text: '低', class: 'security-low', color: '#F44336' }
+  };
+  
+  const level = securityLevels[result.securityLevel || 'medium'];
+  securityLevelEl.textContent = level.text;
+  securityLevelEl.style.color = level.color;
+  
+  // 隐藏识别信息区域，显示成功区域
+  recognitionInfoEl.style.display = 'none';
+  signinSuccessEl.style.display = 'block';
+  
+  // 停止摄像头
+  if (videoElement.srcObject) {
+    const tracks = videoElement.srcObject.getTracks();
+    tracks.forEach(track => track.stop());
+    videoElement.style.opacity = '0.3';
+  }
+  
+  statusEl.textContent = `✓ ${name} 签到成功！安全等级: ${level.text}`;
+  statusEl.className = 'success';
+}
+
+// 发送签到信息
+function sendSignIn(name, confidence) {
+  try {
+    isSubmitting = true;
+    
+    document.getElementById("nameField").value = name;
+    document.getElementById("timeField").value = new Date().toISOString();
+    
+    console.log('正在提交签到数据:', name, '置信度:', confidence);
+    
+    const iframe = document.getElementById('resultIframe');
+    iframe.onload = function() {
+      console.log('数据提交完成！');
+      isSubmitting = false;
+      
+      // 显示成功消息
+      setTimeout(() => {
+        alert(`✓ 签到成功！\n姓名: ${name}\n置信度: ${(confidence*100).toFixed(1)}%\n数据已保存到Google表格`);
+      }, 300);
+    };
+    
+    // 提交表单
+    document.getElementById("sendForm").submit();
+    
+  } catch (error) {
+    console.error('提交失败:', error);
+    statusEl.textContent = '提交失败: ' + error.message;
+    statusEl.className = 'error';
+    alert('签到提交失败，请手动记录。错误: ' + error.message);
+    isSubmitting = false;
+    hasSignedIn = false; // 允许重试
+  }
+}
+
+// 添加页面卸载时的清理
+window.addEventListener('beforeunload', () => {
+  if (videoElement.srcObject) {
+    const tracks = videoElement.srcObject.getTracks();
+    tracks.forEach(track => track.stop());
+  }
+});
+
+// 全局错误处理
+window.addEventListener('error', (e) => {
+  console.error('全局错误:', e.error);
+  if (statusEl) {
+    statusEl.textContent = '发生错误: ' + e.message;
+    statusEl.className = 'error';
+  }
+});
+</script>
+
+</body>
+</html>
