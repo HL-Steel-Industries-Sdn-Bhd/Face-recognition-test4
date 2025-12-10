@@ -244,9 +244,9 @@ class EnhancedFaceVerifier {
     const faceData = this.knownFaces.get(bestMatch);
     
     // 三重阈值验证
-    const isZScoreValid = bestZScore < 0.85;                    // Z-score阈值
-    const isSimilarityValid = bestSimilarity > 0.75;           // 相似度阈值
-    const isInternalValid = bestSimilarity > (faceData.minSimilarity * 0.85); // 内部一致性
+    const isZScoreValid = bestZScore < 1.1;                    // Z-score阈值
+    const isSimilarityValid = bestSimilarity > 0.68;           // 相似度阈值
+    const isInternalValid = bestSimilarity > (faceData.minSimilarity * 0.8); // 内部一致性
     
     if (isZScoreValid && isSimilarityValid && isInternalValid) {
       // 更新连续匹配计数
